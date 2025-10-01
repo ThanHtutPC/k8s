@@ -1,0 +1,10 @@
+# kind-cluster.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  # 1 control-plane node
+  - role: control-plane
+  # 2 worker nodes
+  - role: worker
+  - role: worker
+
