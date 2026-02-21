@@ -1,0 +1,26 @@
+# Terraform generated files and directories
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# Variable files that may contain secrets or be environment-specific
+*.tfvars
+*.tfvars.json
+
+# Override files for local development
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Crash log files and CLI configuration
+crash.log
+.terraformrc
+terraform.rc
+
+# Optional: graph output files
+*.dot
+
+# qcow2
+vm-disk.qcow2

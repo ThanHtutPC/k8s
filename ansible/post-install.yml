@@ -1,0 +1,28 @@
+---
+- name: Post-installation tasks
+  hosts: masters
+  become: yes
+  become_user: ubuntu
+  tasks:
+    - name: Wait for nodes to be ready
+      command: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      register: wait_result
+      retries: 10
+      delay: 30
+      until: wait_result.rc == 0
+
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+
+    - name: Get nodes
+      command: kubectl get nodes -o wide
+      register: nodes
+
+    - name: Display nodes
+      debug:
+        msg: "{{ nodes.stdout_lines }}"

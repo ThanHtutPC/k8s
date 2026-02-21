@@ -1,0 +1,145 @@
+# Worker node setup - alternative with kubectl check
+- name: Join workers to cluster
+  hosts: workers
+  become: yes
+  vars:
+    kubernetes_version: "1.28"
+    pod_network_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    container_runtime: "containerd"
+  tasks:
+    - name: Get node name
+      command: hostname
+      register: hostname_output
+      changed_when: false
+
+    - name: Label worker node
+      command: >
+        kubectl label node {{ hostname_output.stdout }} 
+        node-role.kubernetes.io/worker=worker 
+        --overwrite
+      delegate_to: "{{ groups['masters'][0] }}"
+      when: 
+        - not node_already_joined or node_already_joined
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check if node is already in cluster using kubectl
+      command: >
+        kubectl get nodes {{ hostname_output.stdout }} 
+        -o name --kubeconfig=/etc/kubernetes/admin.conf
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: node_check
+      changed_when: false
+      failed_when: false
+      ignore_errors: yes
+
+    - name: Set fact for node status
+      set_fact:
+        node_already_joined: "{{ node_check.rc == 0 }}"
+
+    - name: Read join command from master
+      slurp:
+        src: /tmp/kubernetes_join_command
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: join_command_slurp
+      when: not node_already_joined
+
+    - name: Decode join command
+      set_fact:
+        join_command: "{{ join_command_slurp.content | b64decode | trim }}"
+      when: not node_already_joined
+
+    - name: Check if br_netfilter module is loaded
+      command: lsmod | grep br_netfilter
+      register: br_netfilter_check
+      changed_when: false
+      failed_when: false
+      when: not node_already_joined
+
+    - name: Load br_netfilter module on worker
+      command: modprobe br_netfilter
+      changed_when: false
+      failed_when: false
+      when: 
+        - not node_already_joined
+        - br_netfilter_check.rc != 0
+
+    - name: Check bridge-nf-call-iptables setting
+      command: sysctl net.bridge.bridge-nf-call-iptables
+      register: iptables_check
+      changed_when: false
+      failed_when: false
+      when: not node_already_joined
+
+    - name: Set bridge-nf-call-iptables on worker
+      command: sysctl -w net.bridge.bridge-nf-call-iptables=1
+      changed_when: false
+      failed_when: false
+      when: 
+        - not node_already_joined
+        - "'= 0' in iptables_check.stdout"
+
+    - name: Check bridge-nf-call-ip6tables setting
+      command: sysctl net.bridge.bridge-nf-call-ip6tables
+      register: ip6tables_check
+      changed_when: false
+      failed_when: false
+      when: not node_already_joined
+
+    - name: Set bridge-nf-call-ip6tables on worker
+      command: sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+      changed_when: false
+      failed_when: false
+      when: 
+        - not node_already_joined
+        - "'= 0' in ip6tables_check.stdout"
+
+    - name: Make bridge settings persistent
+      lineinfile:
+        path: /etc/sysctl.conf
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "net.bridge.bridge-nf-call-iptables=1"
+        - "net.bridge.bridge-nf-call-ip6tables=1"
+      when: not node_already_joined
+
+    - name: Join cluster with preflight errors ignored
+      command: "{{ join_command }} --ignore-preflight-errors=all"
+      when: not node_already_joined
+      register: join_result
+      failed_when: 
+        - join_result.rc != 0
+        - "'already' not in join_result.stderr"
+
+    - name: Display join result
+      debug:
+        msg: "{{ join_result.stdout if join_result.stdout is defined else 'Node joined successfully' }}"
+      when: 
+        - not node_already_joined
+        - join_result is defined
+
+    - name: Display node already joined message
+      debug:
+        msg: "Node {{ hostname_output.stdout }} is already part of the cluster"
+      when: node_already_joined
+
+    - name: Wait for node to be ready
+      command: >
+        kubectl wait --for=condition=Ready node/{{ hostname_output.stdout }}
+        --timeout=60s --kubeconfig=/etc/kubernetes/admin.conf
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: ready_check
+      failed_when: false
+      changed_when: false
+      when: 
+        - not node_already_joined
+        - join_result.rc == 0
+
+    - name: Display node ready status
+      debug:
+        msg: "Node is {{ 'ready' if ready_check.rc == 0 else 'not ready yet' }}"
+      when: 
+        - not node_already_joined
+        - join_result.rc == 0

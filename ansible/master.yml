@@ -1,0 +1,126 @@
+# Master node specific setup
+- name: Initialize Kubernetes master
+  hosts: masters
+  become: yes
+  vars:
+    kubernetes_version: "1.28"
+    pod_network_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    container_runtime: "containerd"
+  tasks:
+    - name: Ensure br_netfilter module is loaded
+      command: modprobe br_netfilter
+      changed_when: false
+      failed_when: false
+
+    - name: Verify bridge-nf-call-iptables exists
+      command: sysctl -w net.bridge.bridge-nf-call-iptables=1
+      changed_when: false
+      register: bridge_check
+      failed_when: false
+
+    - name: Check if cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_conf
+
+    - name: Initialize Kubernetes cluster
+      command: |
+        kubeadm init --pod-network-cidr=10.244.0.0/16 --service-cidr=10.96.0.0/12 --ignore-preflight-errors=all
+      when: not kubeadm_conf.stat.exists
+      register: kubeadm_init
+
+    #- name: Ensure br_netfilter module is loaded
+    #  command: modprobe br_netfilter
+    #  changed_when: false
+    #  failed_when: false
+
+    #- name: Verify bridge-nf-call-iptables exists
+    #  command: sysctl -w net.bridge.bridge-nf-call-iptables=1
+    #  changed_when: false
+    #  register: bridge_check
+    #  failed_when: false
+
+    #- name: Initialize Kubernetes cluster with ignored preflight errors
+    #  command: |
+    #    kubeadm init --pod-network-cidr=10.244.0.0/16 --service-cidr=10.96.0.0/12 --ignore-preflight-errors=FileContent--proc-sys-net-bridge-bridge-nf-call-iptables,Mem
+    #  when: not kubeadm_conf.stat.exists
+    #  register: kubeadm_init
+    #  environment:
+    #    KUBEADM_IGNORE_PREFLIGHT_ERRORS: "FileContent--proc-sys-net-bridge-bridge-nf-call-iptables,Mem"
+
+    - name: Create .kube directory
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy admin.conf to user directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+        remote_src: yes
+
+    - name: Install Calico operator
+      become_user: ubuntu
+      command: |
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.2/manifests/tigera-operator.yaml
+      register: calico_result
+      failed_when: 
+        - calico_result.rc != 0
+        - "'AlreadyExists' not in calico_result.stderr"
+      changed_when: calico_result.rc == 0
+
+    - name: Download Calico custom resources
+      become_user: ubuntu
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.29.2/manifests/custom-resources.yaml
+        dest: /home/ubuntu/custom-resources.yaml
+        mode: '0644'
+      register: calico_cr_download
+
+    - name: Update Calico CIDR in custom resources
+      become_user: ubuntu
+      replace:
+        path: /home/ubuntu/custom-resources.yaml
+        regexp: 'cidr: 192\.168\.0\.0/16'
+        replace: 'cidr: {{ pod_network_cidr }}'
+      when: calico_cr_download.changed
+
+    - name: Apply Calico custom resources
+      become_user: ubuntu
+      command: kubectl apply -f /home/ubuntu/custom-resources.yaml
+      register: calico_custom_result
+      failed_when: 
+        - calico_custom_result.rc != 0
+        - "'AlreadyExists' not in calico_custom_result.stderr"
+      changed_when: calico_custom_result.rc == 0
+
+    - name: Wait for master node to be ready
+      become_user: ubuntu
+      command: kubectl wait --for=condition=Ready node/{{ ansible_hostname }} --timeout=120s
+      register: wait_result
+      retries: 5
+      delay: 10
+      until: wait_result.rc == 0
+      changed_when: false
+
+    - name: Get join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Show join command
+      debug:
+        msg: "Join command: {{ join_command.stdout }}"
+
+    - name: Save join command to file on master
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/kubernetes_join_command
+        mode: '0644'
